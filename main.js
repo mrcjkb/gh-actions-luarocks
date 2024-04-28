@@ -3,8 +3,8 @@ const core = require("@actions/core")
 const exec = require("@actions/exec")
 const io = require("@actions/io")
 const tc = require("@actions/tool-cache")
-const fsp = require("fs").promises
-
+const fs = require("fs")
+const fsp = fs
 const path = require("path")
 
 const BUILD_PREFIX = ".build-luarocks"
@@ -15,17 +15,10 @@ const LUAROCKS_PREFIX = ".luarocks" // default location for LuaRocks installatio
 const isWindows = () => (process.platform || "").startsWith("win32")
 
 async function installWindows(luaRocksVersion, tempBuildPath, luaRocksInstallPath, luaPath) {
-  const binaryZip = await tc.downloadTool(`https://luarocks.org/releases/luarocks-${luaRocksVersion}-windows-64.zip`)
+  const binaryZip = await tc.downloadTool(`https://luarocks.org/releases/luarocks-${luaRocksVersion}-win32.zip`)
   await tc.extractZip(binaryZip, tempBuildPath)
 
-  const srcDir = path.join(tempBuildPath, `luarocks-${luaRocksVersion}-windows-64`)
-  const dstDir = path.join(luaRocksInstallPath, "bin")
-
-  await io.mkdirP(dstDir)
-
-  for (let file of ["luarocks.exe", "luarocks-admin.exe"]) {
-    await fsp.copyFile(path.join(srcDir, file), path.join(dstDir, file))
-  }
+  const srcDir = path.join(tempBuildPath, `luarocks-${luaRocksVersion}-win32`)
 
   let luaVersion = ""
   await exec.exec(`lua -e "print(_VERSION:sub(5))"`, undefined, {
@@ -35,7 +28,36 @@ async function installWindows(luaRocksVersion, tempBuildPath, luaRocksInstallPat
       }
     }
   })
+  if (!luaVersion) throw new Error("Lua version not found.");
 
+  const dstDir = path.join(luaRocksInstallPath, "bin")
+  await io.mkdirP(dstDir)
+  const installBat = path.join(srcDir, `install.bat`)
+  fs.chmodSync(installBat, '755');
+  if (!fs.existsSync(installBat)) {
+    core.setFailed(`install.bat does not exist at ${installBat}`);
+    return;
+  }
+
+  core.info("Installing LuaRocks")
+  const installExitCode = await exec.exec(installBat, [`/LV`, luaVersion, `/P`, dstDir, `/Q`, `/NOADMIN`], {
+    listeners: {
+      stdout: (data) => {
+        core.info(data.toString());
+      },
+      stderr: (data) => {
+        core.error(data.toString());
+      }
+    }
+  })
+  if (installExitCode !== 0) {
+    core.setFailed(`install.bat failed with exit code ${installExitCode}`);
+    return;
+  }
+
+  core.info("Done installing LuaRocks")
+
+  core.info("Configuring LuaRocks")
   await exec.exec(`luarocks config lua_version ${luaVersion}`, undefined, {})
 
   /* fix for mingw without msvc; won't be needed from LuaRocks 3.9.2 onwards */
@@ -43,6 +65,7 @@ async function installWindows(luaRocksVersion, tempBuildPath, luaRocksInstallPat
     await exec.exec(`luarocks config variables.CC "x86_64-w64-mingw32-gcc"`, undefined, {})
     await exec.exec(`luarocks config variables.LD "x86_64-w64-mingw32-gcc"`, undefined, {})
   }
+  core.info("Done configuring LuaRocks")
 }
 
 async function installUnix(luaRocksVersion, tempBuildPath, luaRocksInstallPath, luaPath) {
